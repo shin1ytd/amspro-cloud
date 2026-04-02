@@ -279,16 +279,17 @@ ON CONFLICT DO NOTHING;
 INSERT INTO stages (id, code, name, div, stage_order, stage_group, hrs) VALUES
   ('bp_recv',       'recv',       '受付',           'bp', 1,  'front',    0.5),
   ('bp_estimate',   'estimate',   '見積',           'bp', 2,  'front',    2),
-  ('bp_order',      'order',      '部品発注',       'bp', 3,  'parts',    1),
-  ('bp_disassemble','disassemble','分解',           'bp', 4,  'work',     4),
+  ('bp_order',      'order',      '部品待ち',       'bp', 3,  'parts',    1),
+  ('bp_disassemble','disassemble','メカ分解',       'bp', 4,  'work',     4),
   ('bp_sheet',      'sheet',      '板金',           'bp', 5,  'work',     8),
   ('bp_paint',      'paint',      '塗装',           'bp', 6,  'work',     6),
   ('bp_assemble',   'assemble',   '組付',           'bp', 7,  'work',     4),
-  ('bp_inspect',    'inspect',    '検査',           'bp', 8,  'inspect',  1),
-  ('bp_finish',     'finish',     '仕上',           'bp', 9,  'finish',   2),
-  ('bp_delivery',   'delivery',   '納車',           'bp', 10, 'delivery', 0.5),
-  ('bp_pickup',     'pickup',     '引取り',         'bp', 11, 'transfer', 0.5),
-  ('bp_reservation','reservation','予約',           'bp', 12, 'transfer', 0)
+  ('bp_system',     'system',     'システム設定',   'bp', 8,  'work',     1),
+  ('bp_inspect',    'inspect',    '検査',           'bp', 9,  'inspect',  1),
+  ('bp_finish',     'finish',     '仕上',           'bp', 10, 'finish',   2),
+  ('bp_delivery',   'delivery',   '納車',           'bp', 11, 'delivery', 0.5),
+  ('bp_pickup',     'pickup',     '引取り',         'bp', 12, 'transfer', 0.5),
+  ('bp_reservation','reservation','予約',           'bp', 0,  'transfer', 0)
 ON CONFLICT DO NOTHING;
 
 -- HP工程マスター
@@ -302,7 +303,7 @@ INSERT INTO stages (id, code, name, div, stage_order, stage_group, hrs) VALUES
   ('hp_wash',       'wash',       '洗車・清掃',     'hp', 7,  'finish',   0.5),
   ('hp_delivery',   'delivery',   '納車',           'hp', 8,  'delivery', 0.5),
   ('hp_pickup',     'pickup',     '引取り',         'hp', 9,  'transfer', 0.5),
-  ('hp_reservation','reservation','予約',           'hp', 10, 'transfer', 0)
+  ('hp_reservation','reservation','予約',           'hp', 0,  'transfer', 0)
 ON CONFLICT DO NOTHING;
 
 -- 保留理由
@@ -342,7 +343,7 @@ INSERT INTO upstreams (name, color, sort_order) VALUES
 -- テンプレート（BP）
 INSERT INTO templates (id, name, div, stage_ids, sort_order) VALUES
   ('bp_standard', '標準板金（全工程）', 'bp',
-   '["bp_recv","bp_estimate","bp_order","bp_disassemble","bp_sheet","bp_paint","bp_assemble","bp_inspect","bp_finish","bp_delivery"]', 1),
+   '["bp_recv","bp_estimate","bp_order","bp_disassemble","bp_sheet","bp_paint","bp_assemble","bp_system","bp_inspect","bp_finish","bp_delivery"]', 1),
   ('bp_light',    '軽板金（塗装なし）', 'bp',
    '["bp_recv","bp_estimate","bp_sheet","bp_inspect","bp_finish","bp_delivery"]', 2),
   ('bp_paint_only','塗装のみ', 'bp',
@@ -394,7 +395,7 @@ ON CONFLICT DO NOTHING;
 INSERT INTO wip_limits (stage_id, div, wip_limit) VALUES
   ('bp_recv', 'bp', 10), ('bp_estimate', 'bp', 5), ('bp_order', 'bp', 8),
   ('bp_disassemble', 'bp', 4), ('bp_sheet', 'bp', 4), ('bp_paint', 'bp', 3),
-  ('bp_assemble', 'bp', 4), ('bp_inspect', 'bp', 5), ('bp_finish', 'bp', 5),
+  ('bp_assemble', 'bp', 4), ('bp_system', 'bp', 4), ('bp_inspect', 'bp', 5), ('bp_finish', 'bp', 5),
   ('bp_delivery', 'bp', 10)
 ON CONFLICT DO NOTHING;
 

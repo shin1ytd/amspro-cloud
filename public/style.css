@@ -28,6 +28,8 @@ input,select,textarea{font-family:var(--font);outline:none}
 .sb-logo .ver{font-size:9px;color:rgba(255,255,255,.65);letter-spacing:1px;text-transform:uppercase;margin-top:2px}
 .sb-nav{flex:1;padding:10px 8px;overflow-y:auto}
 .nav-sec{font-size:9.5px;font-weight:700;color:var(--txt3);letter-spacing:.8px;text-transform:uppercase;padding:10px 10px 4px;margin-top:4px}
+.nav-recv-btn{display:flex;align-items:center;justify-content:center;gap:8px;padding:12px 10px;border-radius:var(--r10);font-size:14px;font-weight:700;color:#fff;background:var(--acc2);border:none;width:100%;text-align:center;cursor:pointer;transition:all .14s;margin-bottom:8px;box-shadow:0 2px 8px rgba(26,86,219,.25)}
+.nav-recv-btn:hover{background:#1a56db;transform:translateY(-1px);box-shadow:0 4px 12px rgba(26,86,219,.35)}
 .nav-btn{display:flex;align-items:center;gap:9px;padding:8px 10px;border-radius:var(--r8);font-size:13px;font-weight:500;color:var(--txt2);background:none;border:none;width:100%;text-align:left;transition:all .14s;position:relative}
 .nav-btn:hover{background:var(--bg3);color:var(--txt)}
 .nav-btn.on{background:linear-gradient(135deg,rgba(26,86,219,.12),rgba(37,99,235,.06));color:var(--acc2)}
@@ -99,9 +101,11 @@ tr:hover td{background:#eef4ff}
 .kb-scroll-wrap{display:flex;gap:9px;overflow-x:auto;padding:14px;height:100%;align-items:flex-start}
 .kb-col{min-width:170px;max-width:170px;background:#eceff4;border:1px solid var(--bdr);border-radius:var(--r10);display:flex;flex-direction:column;flex-shrink:0}
 .kb-hdr{padding:8px 10px;border-bottom:1px solid var(--bdr);font-size:9.5px;font-weight:700;text-transform:uppercase;letter-spacing:.5px;display:flex;align-items:center;justify-content:space-between;flex-shrink:0;color:var(--txt2);background:#e2e8f0;border-radius:var(--r10) var(--r10) 0 0}
-.kb-hdr.wip-over{border-bottom-color:var(--red);color:var(--red);background:#fff0f0}
+.kb-hdr.wip-over{border-bottom-color:var(--red);color:var(--red);background:#fff0f0;animation:wip-pulse 2s ease-in-out infinite}
+@keyframes wip-pulse{0%,100%{background:#fff0f0}50%{background:#fecaca}}
 .kb-cnt{background:#fff;border:1px solid var(--bdr);border-radius:20px;padding:1px 6px;font-size:10px;font-weight:700;color:var(--txt2)}
-.kb-cnt.over{background:#fee2e2;border-color:var(--red);color:var(--red)}
+.kb-cnt.over{background:#fee2e2;border-color:var(--red);color:var(--red);font-size:11px}
+.kb-cnt.empty{background:#f0fdf4;border-color:#86efac;color:#16a34a}
 .kb-cards{flex:1;overflow-y:auto;padding:6px;display:flex;flex-direction:column;gap:5px;max-height:calc(100vh - 175px)}
 .kb-card{background:#fff;border:1px solid var(--bdr);border-radius:var(--r8);padding:8px 9px;cursor:pointer;transition:all .13s;box-shadow:0 1px 3px rgba(0,0,0,.04)}
 .kb-card:hover{border-color:var(--acc2);transform:translateY(-1px);box-shadow:0 4px 12px rgba(26,86,219,.12)}
@@ -118,6 +122,20 @@ tr:hover td{background:#eef4ff}
 .kc-day.safe{background:rgba(4,120,87,.12);color:var(--grn)}
 .kc-day.warn{background:rgba(180,83,9,.12);color:var(--ylw)}
 .kc-day.over{background:rgba(185,28,28,.15);color:var(--red)}
+
+/* KANBAN CARD ACTIONS */
+.kc-actions{display:flex;align-items:center;justify-content:space-between;margin-top:5px;gap:4px}
+.kc-mv-btn{font-size:10px;font-weight:700;padding:3px 8px;border:1px solid var(--bdr);border-radius:4px;background:#f8fafc;color:var(--txt2);cursor:pointer;transition:all .12s;white-space:nowrap}
+.kc-mv-btn:hover{background:var(--acc2);color:#fff;border-color:var(--acc2)}
+.kc-mv-next{background:rgba(26,86,219,.08);color:var(--acc2);border-color:rgba(26,86,219,.25)}
+.kc-mv-next:hover{background:var(--acc2);color:#fff}
+.kc-mv-done{background:rgba(4,120,87,.08);color:var(--grn);border-color:rgba(4,120,87,.25)}
+.kc-mv-done:hover{background:var(--grn);color:#fff}
+.kc-mv-sp{width:24px}
+
+/* DRAG & DROP */
+.kb-card.dragging{opacity:.4;transform:rotate(2deg);border:2px dashed var(--acc2)}
+.kb-drop-zone.drop-hover{background:rgba(26,86,219,.06);border:2px dashed var(--acc2);border-radius:var(--r8);min-height:60px}
 
 /* KANBAN FIT */
 .kb-fit-wrap{height:100%;overflow:auto;padding:14px}

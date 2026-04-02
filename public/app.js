@@ -1,6 +1,6 @@
 // ============================================================
-// Ams PRO v4.1 — フロントエンド (API連携版)
-// サーバー: Node.js + Express + SQLite
+// Ams PRO v6.0 — フロントエンド (API連携版)
+// サーバー: Node.js + Express + PostgreSQL
 // ============================================================
 
 // ============================================================
@@ -224,8 +224,9 @@ async function loadMasters() {
   DEFAULT_UPSTREAMS = (data.upstreams || []).map(normalizeUpstream);
   BP_TEMPLATES = {};
   HP_TEMPLATES = {};
-  (data.templates || []).forEach(t => {
-    const key = t.id.replace('bp_', '').replace('hp_', '');
+  const sortedTemplates = [...(data.templates || [])].sort((a, b) => (a.sort_order || 0) - (b.sort_order || 0));
+  sortedTemplates.forEach(t => {
+    const key = t.id;
     if (t.div === 'bp') BP_TEMPLATES[key] = { name: t.name, stages: t.stage_ids };
     else HP_TEMPLATES[key] = { name: t.name, stages: t.stage_ids };
   });
@@ -347,6 +348,145 @@ async function refreshJobs() {
     const jobs = await loadJobs();
     setState({ jobs });
   } catch (e) { /* ignore */ }
+}
+
+// ============================================================
+// カンバン工程移動ヘルパー（サーバー同期方式）
+// ============================================================
+async function _getFreshJob(jobId) {
+  const raw = await API.get(`/api/jobs/${jobId}`);
+  return normalizeJob(raw);
+}
+
+async function moveTaskToNextStage(jobId, taskId) {
+  try {
+    const job = await _getFreshJob(jobId);
+    const sorted = [...job.tasks].sort((a, b) => a.sequence - b.sequence);
+    
+    // デバッグ: 全タスクの状態を表示
+    console.log('=== moveTaskToNextStage ===');
+    console.log('全タスク:', sorted.map(t => ({
+      id: t.id, stageId: t.stageId, sequence: t.sequence, status: t.status,
+      stageName: STAGES.find(s => s.id === t.stageId)?.name
+    })));
+    
+    const idx = sorted.findIndex(tt => tt.id === taskId);
+    console.log('現在のタスクindex:', idx, '/ taskId:', taskId);
+    
+    if (idx < 0) { console.log('ERROR: タスクが見つかりません'); return; }
+    const cur = sorted[idx];
+    console.log('現在:', cur.stageId, STAGES.find(s => s.id === cur.stageId)?.name, 'version:', cur.version);
+
+    await API.put(`/api/tasks/${taskId}`, {
+      status: 'completed', completed_at: new Date().toISOString(), version: cur.version
+    });
+
+    if (idx < sorted.length - 1) {
+      const next = sorted[idx + 1];
+      console.log('次へ:', next.stageId, STAGES.find(s => s.id === next.stageId)?.name, 'version:', next.version);
+      await API.put(`/api/tasks/${next.id}`, {
+        status: 'in_progress', version: next.version
+      });
+      await refreshJobs();
+      showToast(`→ ${STAGES.find(s => s.id === next.stageId)?.name || '次工程'} へ移動`);
+    } else {
+      await API.put(`/api/jobs/${jobId}`, { status: 'completed', version: job.version });
+      await refreshJobs();
+      showToast('全工程完了');
+    }
+  } catch (e) {
+    console.error('moveNext error:', e);
+    showToast('工程移動に失敗しました', 'e');
+    await refreshJobs();
+  }
+}
+
+async function moveTaskToPrevStage(jobId, taskId) {
+  try {
+    const job = await _getFreshJob(jobId);
+    const sorted = [...job.tasks].sort((a, b) => a.sequence - b.sequence);
+    const idx = sorted.findIndex(tt => tt.id === taskId);
+    if (idx <= 0) return;
+    const cur = sorted[idx];
+    const prev = sorted[idx - 1];
+
+    await API.put(`/api/tasks/${taskId}`, {
+      status: 'pending', completed_at: null, version: cur.version
+    });
+    await API.put(`/api/tasks/${prev.id}`, {
+      status: 'in_progress', completed_at: null, version: prev.version
+    });
+
+    await refreshJobs();
+    showToast(`← ${STAGES.find(s => s.id === prev.stageId)?.name || '前工程'} に戻し`);
+  } catch (e) {
+    console.error('movePrev error:', e);
+    showToast('工程戻しに失敗しました', 'e');
+    await refreshJobs();
+  }
+}
+
+async function moveTaskToStageByIdx(jobId, taskId, targetStageIdx, div) {
+  try {
+    const stages = getStagesForDiv(div).filter(s => !TRANSFER_STAGE_CODES.includes(s.code));
+    const targetStage = stages[targetStageIdx];
+    if (!targetStage) return;
+
+    let job = await _getFreshJob(jobId);
+    const sorted = [...job.tasks].sort((a, b) => a.sequence - b.sequence);
+    const curTask = sorted.find(tt => tt.id === taskId);
+    if (!curTask) return;
+    const curStageIdx = stages.findIndex(s => s.id === curTask.stageId);
+    if (curStageIdx < 0 || targetStageIdx === curStageIdx) return;
+
+    // ドロップ先にタスクが存在するか
+    const targetTask = sorted.find(tt => tt.stageId === targetStage.id);
+    if (!targetTask) {
+      showToast('この案件にはその工程がありません', 'e');
+      return;
+    }
+
+    if (targetStageIdx > curStageIdx) {
+      // 前方移動
+      for (let i = curStageIdx; i < targetStageIdx; i++) {
+        job = await _getFreshJob(jobId);
+        const stageTask = job.tasks.find(tt => tt.stageId === stages[i].id);
+        if (stageTask && stageTask.status !== 'completed') {
+          await API.put(`/api/tasks/${stageTask.id}`, {
+            status: 'completed', completed_at: new Date().toISOString(), version: stageTask.version
+          });
+        }
+      }
+      job = await _getFreshJob(jobId);
+      const ft = job.tasks.find(tt => tt.stageId === targetStage.id);
+      if (ft && ft.status !== 'completed') {
+        await API.put(`/api/tasks/${ft.id}`, { status: 'in_progress', version: ft.version });
+      }
+    } else {
+      // 後方移動
+      for (let i = curStageIdx; i > targetStageIdx; i--) {
+        job = await _getFreshJob(jobId);
+        const stageTask = job.tasks.find(tt => tt.stageId === stages[i].id);
+        if (stageTask) {
+          await API.put(`/api/tasks/${stageTask.id}`, {
+            status: 'pending', completed_at: null, version: stageTask.version
+          });
+        }
+      }
+      job = await _getFreshJob(jobId);
+      const ft = job.tasks.find(tt => tt.stageId === targetStage.id);
+      if (ft) {
+        await API.put(`/api/tasks/${ft.id}`, { status: 'in_progress', completed_at: null, version: ft.version });
+      }
+    }
+
+    await refreshJobs();
+    showToast(`→ ${targetStage.name} へ移動`);
+  } catch (e) {
+    console.error('moveToStage error:', e);
+    showToast('工程移動に失敗しました', 'e');
+    await refreshJobs();
+  }
 }
 
 
@@ -532,17 +672,58 @@ function getUserDefaultView(user){
 // ============================================================
 // RENDER
 // ============================================================
+// ============================================================
+// グローバル: 工程戻し（タスクモーダルのonclickから呼ばれる）
+// ============================================================
+window._revertStage = async function(targetTaskId) {
+  if (!targetTaskId) return;
+  const j2 = STATE.selectedJob;
+  if (!j2) return;
+  const targetTask = j2.tasks.find(tt => tt.id === targetTaskId);
+  const stageName = STAGES.find(s => s.id === targetTask?.stageId)?.name || '—';
+  if (!confirm(`「${stageName}」工程に戻しますか？\nこの工程以降は未着手に戻ります。`)) return;
+  try {
+    const job = await _getFreshJob(j2.id);
+    const sorted = [...job.tasks].sort((a, b) => a.sequence - b.sequence);
+    const targetIdx = sorted.findIndex(tt => tt.id === targetTaskId);
+    for (let i = sorted.length - 1; i > targetIdx; i--) {
+      const task = sorted[i];
+      if (task.status !== 'pending') {
+        const fresh = await _getFreshJob(j2.id);
+        const ft = fresh.tasks.find(tt => tt.id === task.id);
+        if (ft) await API.put(`/api/tasks/${ft.id}`, { status: 'pending', completed_at: null, version: ft.version });
+      }
+    }
+    const fresh2 = await _getFreshJob(j2.id);
+    const ft2 = fresh2.tasks.find(tt => tt.id === targetTaskId);
+    if (ft2) await API.put(`/api/tasks/${ft2.id}`, { status: 'in_progress', completed_at: null, version: ft2.version });
+    const fresh3 = await _getFreshJob(j2.id);
+    if (fresh3.status === 'completed') {
+      await API.put(`/api/jobs/${j2.id}`, { status: 'in_progress', version: fresh3.version });
+    }
+    await refreshJobs();
+    setState({ modal: null, selectedJob: null, selectedTask: null });
+    showToast(`↩ 「${stageName}」に戻しました`);
+  } catch (e) {
+    console.error('revert error:', e);
+    showToast('戻しに失敗しました', 'e');
+    await refreshJobs();
+  }
+};
+
 function render(){
   const root=document.getElementById('app');
   if(!root)return;
   if(!STATE.user){root.innerHTML=loginHTML();bindLogin();return;}
   root.innerHTML=shellHTML();
   bindAll();
+  document.querySelectorAll('.toast').forEach(e=>e.remove());
   if(STATE.toast){
     const el=document.createElement('div');
     el.className=`toast ${STATE.toast.type}`;
     el.textContent=(STATE.toast.type==='s'?'✅ ':STATE.toast.type==='e'?'❌ ':'ℹ️ ')+STATE.toast.msg;
     document.body.appendChild(el);
+    setTimeout(()=>el.remove(), 3200);
   }
 }
 
@@ -639,7 +820,9 @@ function shellHTML(){
   const showBP=user.div==='bp'||user.div==='all'||user.role==='admin';
   const showHP=user.div==='hp'||user.div==='all'||user.role==='admin';
 
+  const canAddJob=['admin','manager','front'].includes(user.role);
   const navItems=[
+    canAddJob?{v:'__recv_btn',i:'＋',l:'受付登録',special:true}:null,
     {v:'myview',i:'👤',l:'マイビュー'},
     user.role==='driver'?null:{v:'sep'},
     user.role!=='driver'&&showBP?{v:'dashboard',i:'📊',l:'BP ダッシュボード',cls:'bp-on'}:null,
@@ -658,6 +841,11 @@ function shellHTML(){
   const nav=navItems.map(it=>{
     if(it.v&&it.v.startsWith('sep'))return'<div style="height:1px;background:var(--bdr);margin:8px 4px"></div>';
     if(it.hide)return'';
+    if(it.special){
+      return`<button class="nav-recv-btn" id="sidebar-recv-btn">
+        <span style="font-size:18px">＋</span><span style="font-weight:700">受付登録</span>
+      </button>`;
+    }
     const isOn=view===it.v;
     const cls=isOn?(it.cls||'on'):'';
     return`<button class="nav-btn ${cls}" data-view="${it.v}">
@@ -695,7 +883,7 @@ function shellHTML(){
   return`<div class="app-shell" style="display:flex;height:100vh;overflow:hidden">
   <div class="sb-backdrop ${STATE.sidebarOpen?'on':''}" id="sb-backdrop"></div>
   <aside class="sb ${STATE.sidebarOpen?'mob-open':''}" id="sidebar">
-    <div class="sb-logo"><div class="brand">🔧 Ams PRO</div><div class="ver">自動車工程管理 v4.1</div></div>
+    <div class="sb-logo"><div class="brand">🔧 Ams PRO</div><div class="ver">自動車工程管理 v6.0</div></div>
     <nav class="sb-nav">${nav}</nav>
     <div class="sb-user">
       <div class="u-av ${avClass}">${user.name[0]}</div>
@@ -959,7 +1147,10 @@ function vKanbanTransfer(){
 
 // ── KANBAN DIV（BP / HP） ──────────────────────────────────────────
 function vKanbanDiv(div){
-  const stages=getStagesForDiv(div);
+  const allStages=getStagesForDiv(div);
+  // カンバンカラムにはtransfer系（引取り・納車・予約）を表示しない
+  // これらは「引取り・納車」ビューや予約カラムで別管理
+  const stages=allStages.filter(s=>!TRANSFER_STAGE_CODES.includes(s.code));
   const wipLimits=getWipLimits(div);
   const allDivJobs=STATE.jobs.filter(j=>j.div===div);
   const reservedJobs=allDivJobs.filter(j=>j.status==='reserved');
@@ -1023,16 +1214,17 @@ function vKanbanDiv(div){
     </div>
   </div>`:'';
 
-  const cols=stages.map(s=>{
+  const cols=stages.map((s,si)=>{
     const wip=wipLimits[s.id];
     const cards=jobs.filter(j=>j.tasks.some(t=>t.stageId===s.id&&['in_progress','hold','ready'].includes(t.status)));
     const n=cards.length;
     const over=wip&&n>=wip;
-    return`<div class="kb-col">
+    const empty=n===0&&wip;
+    return`<div class="kb-col" data-stage-id="${s.id}" data-stage-idx="${si}">
       <div class="kb-hdr ${over?'wip-over':''}">${s.name}
-        <span class="kb-cnt ${over?'over':''}">${n}${wip?'/'+wip:''}</span>
+        <span class="kb-cnt ${over?'over':empty?'empty':''}">${n}${wip?'/'+wip:''}</span>
       </div>
-      <div class="kb-cards">
+      <div class="kb-cards kb-drop-zone" data-drop-stage="${s.id}" data-drop-idx="${si}">
         ${cards.map(j=>{
           const t=j.tasks.find(t=>t.stageId===s.id&&['in_progress','hold','ready'].includes(t.status));
           if(!t)return'';
@@ -1041,7 +1233,11 @@ function vKanbanDiv(div){
           const dlbl=dd<0?`${Math.abs(dd)}日超過`:dd===0?'本日':`残${dd}日`;
           const isHold=t.status==='hold';
           const isUrg=j.priority==='urgent';
-          return`<div class="kb-card ${isUrg&&!isHold?'urg':''} ${isHold?'hold':''}" data-otask="${j.id}__${t.id}">
+          const sorted=[...j.tasks].sort((a,b)=>(a.sequence||0)-(b.sequence||0));
+          const tIdx=sorted.findIndex(tt=>tt.id===t.id);
+          const hasPrev=tIdx>0;
+          const hasNext=tIdx<sorted.length-1;
+          return`<div class="kb-card ${isUrg&&!isHold?'urg':''} ${isHold?'hold':''}" draggable="true" data-drag-job="${j.id}" data-drag-task="${t.id}" data-otask="${j.id}__${t.id}">
             <div class="kc-num">${j.jobNumber}${div==='hp'&&j.subType?` <span style="font-size:8px;color:var(--txt3)">${subTypeLabel(j.subType)}</span>`:''}</div>
             <div class="kc-nm">${j.customerName} ${upstreamBadge(j.upstream||'自受け')}</div>
             <div class="kc-veh">🚗 ${j.vehicleName.split('　')[0]}</div>
@@ -1050,13 +1246,17 @@ function vKanbanDiv(div){
               <span class="kc-day ${dcls}">${dlbl}</span>
             </div>
             ${isHold?`<div style="font-size:8.5px;color:var(--ylw);background:rgba(180,83,9,.1);border-radius:3px;padding:1px 4px;margin-top:2px;display:inline-block">⚠️${HOLD_REASONS.find(h=>h.id===t.holdReasonId)?.name||'保留'}</div>`:''}
+            <div class="kc-actions" onclick="event.stopPropagation()">
+              ${hasPrev?`<button class="kc-mv-btn" data-mv-prev="${j.id}__${t.id}" title="← 前の工程に戻す">◀</button>`:'<span class="kc-mv-sp"></span>'}
+              ${hasNext?`<button class="kc-mv-btn kc-mv-next" data-mv-next="${j.id}__${t.id}" title="次の工程へ →">▶ 次へ</button>`:`<button class="kc-mv-btn kc-mv-done" data-mv-done="${j.id}__${t.id}" title="完了">✓ 完了</button>`}
+            </div>
           </div>`;
         }).join('')||'<div style="text-align:center;padding:14px;color:var(--txt3);font-size:11px">なし</div>'}
       </div>
     </div>`;
   }).join('');
 
-  return`<div class="kb-scroll-wrap">
+  return`<div class="kb-scroll-wrap" data-kb-div="${div}">
     ${canAdd?`<div style="position:absolute;top:10px;right:14px;z-index:5">
       <button class="btn ${div==='hp'?'btn-hp':'btn-p'} btn-sm" id="new-job-btn">＋ ${div==='hp'?'HP':'BP'} 受付</button>
     </div>`:''}
@@ -1529,7 +1729,18 @@ function mTask(){
         </div>
       </details>
     </div>
-    <div class="mo-ft">
+    <div class="mo-ft" style="flex-wrap:wrap;gap:8px">
+      ${['admin','manager','front'].includes(user.role)?`
+        <div style="margin-right:auto">
+          <select class="fi" style="font-size:11px;padding:4px 8px;width:auto;min-width:140px;color:var(--acc2);font-weight:600" onchange="if(this.value){window._revertStage(this.value);this.value='';}">
+            <option value="">↩ 工程に戻す...</option>
+            ${j.tasks.filter(tt=>tt.id!==t.id).map(tt=>{
+              const s=STAGES.find(s=>s.id===tt.stageId);
+              return`<option value="${tt.id}">${s?.name||'—'}${tt.status==='completed'?' ✓':''}</option>`;
+            }).join('')}
+          </select>
+        </div>
+      `:''}
       <button class="btn btn-n" id="mc-x2">キャンセル</button>
       <button class="btn btn-p" id="t-save">保存する</button>
     </div>
@@ -1547,17 +1758,19 @@ function mJobDetail(){
     const st=STAGES.find(s=>s.id===t.stageId);
     const ass=t.assigneeId?getUserById(t.assigneeId):null;
     const hr=t.holdReasonId?HOLD_REASONS.find(h=>h.id===t.holdReasonId):null;
-    const isDone=t.status==='completed';const isCur=['in_progress','hold'].includes(t.status);
+    const isDone=t.status==='completed';const isCur=['in_progress','hold','ready'].includes(t.status);
     const editable=canEdit(user,t,j);
-    return`<div class="sf-row ${isCur?'cur':''} ${isDone?'done':''} ${t.status==='hold'?'hld':''} ${editable?'':'no-edit'}"
-      ${editable?`data-otask="${j.id}__${t.id}"`:''}>
+    const canRevert=isDone&&['admin','manager','front'].includes(user.role);
+    return`<div class="sf-row ${isCur?'cur':''} ${isDone?'done':''} ${t.status==='hold'?'hld':''} ${editable||canRevert?'':'no-edit'}"
+      ${editable&&!isDone?`data-otask="${j.id}__${t.id}"`:''}>
       <div class="sf-num ${isDone?'d':isCur?'c':t.status==='hold'?'h':'p'}">${isDone?'✓':i+1}</div>
       <div class="sf-nm">${st?.name||'—'}${hr?`<span style="margin-left:6px;font-size:10px;color:var(--ylw)">⚠️ ${hr.name}</span>`:''}
         ${t.reworkCount>0?`<span style="margin-left:6px;font-size:10px;color:var(--red)">差戻${t.reworkCount}回</span>`:''}</div>
       <div class="sf-sub">${ass?ass.name.split(' ')[1]||ass.name:'—'}</div>
       <div class="sf-sub">${fmtD(t.finishEta)}</div>
       <div><span style="font-size:10.5px;font-weight:700;padding:2px 6px;border-radius:3px;background:${ST_COLORS[t.status]}18;color:${ST_COLORS[t.status]}">${ST_LABELS[t.status]}</span></div>
-      ${editable?'<span style="font-size:11px;color:var(--txt3)">✏️</span>':''}
+      ${editable&&!isDone?'<span style="font-size:11px;color:var(--txt3)">✏️</span>':''}
+      ${canRevert?`<button class="kc-mv-btn" style="font-size:9px;padding:2px 6px" data-revert-to="${j.id}__${t.id}" onclick="event.stopPropagation()" title="この工程に戻す">↩ ここに戻す</button>`:''}
     </div>`;}).join('');
 
   const p=getProfit(j);
@@ -1965,10 +2178,7 @@ function bindAll(){
   document.querySelectorAll('[data-qdone]').forEach(el=>el.addEventListener('click',e=>{
     e.stopPropagation();
     const [jid,tid]=el.dataset.qdone.split('__');
-    const j=STATE.jobs.find(j=>j.id===jid);const t=j?.tasks.find(t=>t.id===tid);
-    if(!j||!t)return;
-    updateTask(jid,tid,{status:'completed',completedAt:new Date().toISOString()},t.version)
-      .then(ok=>{ if(ok)showToast('工程を完了しました'); });
+    moveTaskToNextStage(jid,tid);
   }));
   document.querySelectorAll('[data-qhold]').forEach(el=>el.addEventListener('click',e=>{
     e.stopPropagation();
@@ -1976,6 +2186,49 @@ function bindAll(){
     const j=STATE.jobs.find(j=>j.id===jid);const t=j?.tasks.find(t=>t.id===tid);
     if(j&&t)setState({selectedJob:j,selectedTask:t,modal:'task'});
   }));
+
+  // ── カンバン工程移動ボタン ──
+  document.querySelectorAll('[data-mv-next]').forEach(el=>el.addEventListener('click',e=>{
+    e.stopPropagation();
+    const [jid,tid]=el.dataset.mvNext.split('__');
+    moveTaskToNextStage(jid,tid);
+  }));
+  document.querySelectorAll('[data-mv-prev]').forEach(el=>el.addEventListener('click',e=>{
+    e.stopPropagation();
+    const [jid,tid]=el.dataset.mvPrev.split('__');
+    moveTaskToPrevStage(jid,tid);
+  }));
+  document.querySelectorAll('[data-mv-done]').forEach(el=>el.addEventListener('click',e=>{
+    e.stopPropagation();
+    const [jid,tid]=el.dataset.mvDone.split('__');
+    moveTaskToNextStage(jid,tid);
+  }));
+
+  // ── ドラッグ＆ドロップ ──
+  document.querySelectorAll('[draggable="true"][data-drag-job]').forEach(card=>{
+    card.addEventListener('dragstart',e=>{
+      e.dataTransfer.setData('text/plain',JSON.stringify({
+        jobId:card.dataset.dragJob, taskId:card.dataset.dragTask,
+        div:card.closest('.kb-scroll-wrap')?.dataset.kbDiv||''
+      }));
+      card.classList.add('dragging');
+      e.dataTransfer.effectAllowed='move';
+    });
+    card.addEventListener('dragend',()=>card.classList.remove('dragging'));
+  });
+  document.querySelectorAll('.kb-drop-zone').forEach(zone=>{
+    zone.addEventListener('dragover',e=>{e.preventDefault();e.dataTransfer.dropEffect='move';zone.classList.add('drop-hover');});
+    zone.addEventListener('dragleave',()=>zone.classList.remove('drop-hover'));
+    zone.addEventListener('drop',e=>{
+      e.preventDefault();zone.classList.remove('drop-hover');
+      try{
+        const d=JSON.parse(e.dataTransfer.getData('text/plain'));
+        const targetIdx=parseInt(zone.dataset.dropIdx,10);
+        const j=STATE.jobs.find(jj=>jj.id===d.jobId);
+        if(j)moveTaskToStageByIdx(d.jobId,d.taskId,targetIdx,j.div);
+      }catch(ex){}
+    });
+  });
 
   document.querySelectorAll('[data-fl]').forEach(b=>b.addEventListener('click',()=>setState({listFilter:b.dataset.fl})));
   document.querySelectorAll('[data-period]').forEach(b=>b.addEventListener('click',()=>setState({listPeriod:b.dataset.period})));
@@ -1986,9 +2239,18 @@ function bindAll(){
   document.getElementById('list-date-from')?.addEventListener('change',e=>setState({listPeriod:'custom',listDateFrom:e.target.value}));
   document.getElementById('list-date-to')?.addEventListener('change',e=>setState({listPeriod:'custom',listDateTo:e.target.value}));
 
+  document.getElementById('sidebar-recv-btn')?.addEventListener('click',()=>{
+    setState({modal:'newJob',newJobDiv:null,sidebarOpen:false});
+  });
+
   document.getElementById('new-job-btn')?.addEventListener('click',()=>{
-    const canAuto=STATE.user?.div!=='all'&&STATE.user?.role!=='admin';
-    setState({modal:'newJob',newJobDiv:canAuto?STATE.user.div:null});
+    // カンバンビューからの場合、表示中のdivを自動設定（BP/HP選択画面をスキップ）
+    const view=STATE.view||'';
+    let autoDiv=null;
+    if(view==='bp_kanban') autoDiv='bp';
+    else if(view==='hp_kanban') autoDiv='hp';
+    else if(STATE.user?.div!=='all'&&STATE.user?.role!=='admin') autoDiv=STATE.user.div;
+    setState({modal:'newJob',newJobDiv:autoDiv});
   });
 
   document.querySelectorAll('[data-mtab]').forEach(b=>b.addEventListener('click',()=>setState({masterTab:b.dataset.mtab})));
@@ -2157,9 +2419,52 @@ function bindAll(){
         completedAt:curSt==='completed'?new Date().toISOString():null,
       };
       if(!canEdit(STATE.user,t,j)){err.innerHTML='<div class="alert danger">⚠️ この工程を変更する権限がありません</div>';return;}
-      updateTask(j.id,t.id,changes,t.version).then(ok=>{
-        if(ok){setState({modal:null,selectedJob:null,selectedTask:null});showToast('工程を更新しました');}
-      });
+
+      // サーバー同期方式で保存
+      (async()=>{
+        try {
+          const freshJob = await _getFreshJob(j.id);
+          const freshTask = freshJob.tasks.find(tt => tt.id === t.id);
+          if (!freshTask) { showToast('タスクが見つかりません', 'e'); return; }
+
+          const apiChanges = {};
+          if (changes.status !== undefined) apiChanges.status = changes.status;
+          if (changes.assigneeId !== undefined) apiChanges.assignee_id = changes.assigneeId;
+          if (changes.finishEta !== undefined) apiChanges.finish_eta = changes.finishEta;
+          if (changes.holdReasonId !== undefined) apiChanges.hold_reason_id = changes.holdReasonId;
+          if (changes.ngReasonId !== undefined) apiChanges.ng_reason_id = changes.ngReasonId;
+          if (changes.note !== undefined) apiChanges.note = changes.note;
+          if (changes.completedAt !== undefined) apiChanges.completed_at = changes.completedAt;
+          apiChanges.version = freshTask.version;
+
+          await API.put(`/api/tasks/${t.id}`, apiChanges);
+
+          // 完了にした場合、次のタスクを自動でin_progressに
+          if (curSt === 'completed') {
+            const freshJob2 = await _getFreshJob(j.id);
+            const sorted = [...freshJob2.tasks].sort((a, b) => a.sequence - b.sequence);
+            const idx = sorted.findIndex(tt => tt.id === t.id);
+            if (idx >= 0 && idx < sorted.length - 1) {
+              const next = sorted[idx + 1];
+              if (next.status === 'pending') {
+                await API.put(`/api/tasks/${next.id}`, { status: 'in_progress', version: next.version });
+              }
+            }
+            const freshJob3 = await _getFreshJob(j.id);
+            const allDone = freshJob3.tasks.every(tt => tt.status === 'completed');
+            if (allDone) {
+              await API.put(`/api/jobs/${j.id}`, { status: 'completed', version: freshJob3.version });
+            }
+          }
+
+          await refreshJobs();
+          setState({ modal: null, selectedJob: null, selectedTask: null });
+          showToast('工程を更新しました');
+        } catch (e) {
+          showToast('保存に失敗しました。再読み込みします。', 'e');
+          await refreshJobs();
+        }
+      })();
     });
   }
 
@@ -2171,6 +2476,48 @@ function bindAll(){
       const [jid,tid]=el.dataset.otask.split('__');
       const j2=STATE.jobs.find(j=>j.id===jid);const t2=j2?.tasks.find(t=>t.id===tid);
       if(j2&&t2)setState({selectedJob:j2,selectedTask:t2,modal:'task'});
+    }));
+    // ── 「ここに戻す」ボタン ──
+    document.querySelectorAll('[data-revert-to]').forEach(el=>el.addEventListener('click',async e=>{
+      e.stopPropagation();
+      const [jid,tid]=el.dataset.revertTo.split('__');
+      const j2=STATE.jobs.find(j=>j.id===jid);
+      if(!j2)return;
+      const targetTask=j2.tasks.find(t=>t.id===tid);
+      if(!targetTask)return;
+      const stageName=STAGES.find(s=>s.id===targetTask.stageId)?.name||'—';
+      if(!confirm(`「${stageName}」工程に戻しますか？\nこの工程以降は未着手に戻ります。`))return;
+      try{
+        const job=await _getFreshJob(jid);
+        const sorted=[...job.tasks].sort((a,b)=>a.sequence-b.sequence);
+        const targetIdx=sorted.findIndex(tt=>tt.id===tid);
+        // ターゲット以降のタスクを全てpendingに戻す
+        for(let i=sorted.length-1;i>targetIdx;i--){
+          const task=sorted[i];
+          if(task.status!=='pending'){
+            const fresh=await _getFreshJob(jid);
+            const ft=fresh.tasks.find(tt=>tt.id===task.id);
+            if(ft)await API.put(`/api/tasks/${ft.id}`,{status:'pending',completed_at:null,version:ft.version});
+          }
+        }
+        // ターゲットのタスクをin_progressにする
+        const fresh2=await _getFreshJob(jid);
+        const ft2=fresh2.tasks.find(tt=>tt.id===tid);
+        if(ft2)await API.put(`/api/tasks/${ft2.id}`,{status:'in_progress',completed_at:null,version:ft2.version});
+        // 案件ステータスも進行中に戻す
+        const fresh3=await _getFreshJob(jid);
+        if(fresh3.status==='completed'){
+          await API.put(`/api/jobs/${jid}`,{status:'in_progress',version:fresh3.version});
+        }
+        await refreshJobs();
+        const updatedJob=STATE.jobs.find(j=>j.id===jid);
+        setState({selectedJob:updatedJob});
+        showToast(`↩ 「${stageName}」に戻しました（差戻）`);
+      }catch(e){
+        console.error('revert error:',e);
+        showToast('戻しに失敗しました','e');
+        await refreshJobs();
+      }
     }));
     document.getElementById('jf-save')?.addEventListener('click',()=>{
       const j2=STATE.selectedJob;if(!j2)return;
