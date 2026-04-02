@@ -3,8 +3,8 @@ FROM node:20-slim
 WORKDIR /app
 
 # 依存パッケージインストール（キャッシュ効率化）
-COPY package.json package-lock.json* ./
-RUN npm ci --omit=dev
+COPY package.json ./
+RUN npm install --omit=dev
 
 # アプリケーションコピー
 COPY . .
